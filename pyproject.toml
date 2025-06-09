@@ -1,0 +1,23 @@
+[project]
+name = "tarty"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.11.5",
+]
+
+[project.group.dev.dependencies]
+pytest = ">=8.4.0"
+freezegun = ">=1.5.1"
+
+[tool.ruff]
+line-length = 78
+
+[tool.ruff.lint]
+# Use the defaults + this
+# (isort)
+extend-select = ["I"]
+
+[tool.ruff.format]
+quote-style = 'single'
+indent-style = 'space'
