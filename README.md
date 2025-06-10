@@ -67,6 +67,8 @@ Uses a configuration file containing:
 
 Almost none - pydantic is used for input validation.
 
+Uses modern Python features like union types (|) instead of Optional/Union from typing.
+
 ## Implementation requirements ##
 
 This should be single file Python script, with unit tests outside it.
