@@ -94,6 +94,8 @@ class RunnerConfig(BaseModel):
     convert_command: str | None = None
     repository: str | None = None
     labels: list[str] | None = None
+    ephemeral: bool = True
+    vm_prefix: str = 'tarty'
 
     @field_validator(
         'github_pat',
@@ -146,8 +148,8 @@ def run_ssh_command(
     )
 
 
-def cleanup_previous_tarty_vms():
-    """Delete all previous tarty-prefixed VMs."""
+def cleanup_previous_vms(vm_prefix: str):
+    """Delete all previous VMs with the given prefix."""
     try:
         result = run_tart_command(
             ['list', '-q'], capture_output=True, text=True, check=True
@@ -156,7 +158,7 @@ def cleanup_previous_tarty_vms():
 
         for vm_name in vm_names:
             vm_name = vm_name.strip()
-            if vm_name.startswith('tarty-'):
+            if vm_name.startswith(f'{vm_prefix}-'):
                 logger.info('Cleaning up previous VM: %s', vm_name)
                 try:
                     run_tart_command(
@@ -241,8 +243,15 @@ class TartyConfig:
                     'update-hour',
                     'max-vms',
                     'labels',
+                    'vm-prefix',
                 ]:
                     config_data[key.replace('-', '_')] = value
+
+            # Handle ephemeral flag specially
+            if self.cli_args.ephemeral:
+                config_data['ephemeral'] = True
+            elif self.cli_args.no_ephemeral:
+                config_data['ephemeral'] = False
 
         try:
             return RunnerConfig(**config_data)
@@ -288,6 +297,14 @@ class TartyConfig:
     @property
     def labels(self) -> list[str] | None:
         return self.runner_config.labels
+
+    @property
+    def ephemeral(self) -> bool:
+        return self.runner_config.ephemeral
+
+    @property
+    def vm_prefix(self) -> str:
+        return self.runner_config.vm_prefix
 
 
 class TartVM:
@@ -543,7 +560,14 @@ class GitHubRunnerManager:
         if self.config.repository:
             url += '/' + self.config.repository
 
-        command = f'cd actions-runner && ./config.sh --url {url} --token {token} --name {runner_name} --ephemeral --unattended'
+        command = f'cd actions-runner && ./config.sh --url {url} --token {token} --name {runner_name}'
+
+        if self.config.ephemeral:
+            command += ' --ephemeral'
+        else:
+            command += ' --replace'
+
+        command += ' --unattended'
 
         if self.config.labels and len(self.config.labels) > 0:
             labels_str = ','.join(self.config.labels)
@@ -639,7 +663,9 @@ class ImageManager:
             )
             return True
 
-        temp_vm_name = 'tarty-convert-' + str(int(time.time()))
+        temp_vm_name = f'{self.config.vm_prefix}-convert-' + str(
+            int(time.time())
+        )
 
         try:
             logger.info('Starting runner image update process')
@@ -779,7 +805,7 @@ class TartyOrchestrator:
         """Start the orchestrator."""
         logger.info('Starting Tarty orchestrator')
 
-        cleanup_previous_tarty_vms()
+        cleanup_previous_vms(self.config.vm_prefix)
 
         self.running = True
 
@@ -820,10 +846,20 @@ class TartyOrchestrator:
 
     def _start_new_vms_if_needed(self):
         """Start new VMs if we have capacity."""
-        while len(self.vms) < self.config.max_vms:
-            vm_name = 'tarty-runner-' + str(int(time.time()))
-            if self._create_and_start_vm(vm_name):
-                break  # Only create one VM per cycle
+        if self.config.ephemeral:
+            while len(self.vms) < self.config.max_vms:
+                vm_name = f'{self.config.vm_prefix}-runner-' + str(
+                    int(time.time())
+                )
+                if self._create_and_start_vm(vm_name):
+                    break  # Only create one VM per cycle
+        else:
+            # For non-ephemeral mode, create VMs with fixed names
+            for i in range(self.config.max_vms):
+                vm_name = f'{self.config.vm_prefix}-runner-{i + 1}'
+                if vm_name not in self.vms:
+                    self._create_and_start_vm(vm_name)
+                    break  # Only create one VM per cycle
 
     def _create_and_start_vm(self, vm_name: str) -> bool:
         """Create and start a new VM."""
@@ -883,6 +919,8 @@ class TartyOrchestrator:
             if self.image_manager.update_runner_image():
                 self.image_manager.last_update = datetime.now()
                 self.image_manager._save_last_update()
+                if not self.config.ephemeral:
+                    self._cleanup_existing_vms()
 
     def _make_room_for_update(self):
         """Kill one VM to make room for update process."""
@@ -891,14 +929,41 @@ class TartyOrchestrator:
             logger.info('Killing VM %s for nightly update', vm_to_kill.name)
             self._cleanup_vm(vm_to_kill)
 
+    def _cleanup_existing_vms(self):
+        """Destroy existing VMs to use updated runner image."""
+        logger.info('Destroying existing VMs to use updated image')
+        for _, vm in list(self.vms.items()):
+            self._cleanup_vm(vm)
 
-def setup_logging(verbose: bool = False):
+
+def setup_logging(
+    verbose: bool = False,
+    log_file: str | None = None,
+    log_level: str = 'INFO',
+):
     """Setup logging configuration."""
-    level = logging.DEBUG if verbose else logging.INFO
+    # Determine log level
+    if verbose:
+        level = logging.DEBUG
+    else:
+        level_map = {
+            'DEBUG': logging.DEBUG,
+            'INFO': logging.INFO,
+            'WARNING': logging.WARNING,
+            'ERROR': logging.ERROR,
+            'CRITICAL': logging.CRITICAL,
+        }
+        level = level_map.get(log_level.upper(), logging.INFO)
+
+    # Setup handlers
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+
     logging.basicConfig(
         level=level,
         format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(), logging.FileHandler('tarty.log')],
+        handlers=handlers,
     )
 
 
@@ -915,6 +980,8 @@ def create_sample_config(config_path: str):
         'update_hour': DEFAULT_UPDATE_HOUR,
         'max_vms': MAX_VMS,
         'labels': ['macos', 'tart'],
+        'ephemeral': True,
+        'vm_prefix': 'tarty',
     }
 
     with open(config_path, 'w') as f:
@@ -935,6 +1002,13 @@ def main():
     parser.add_argument(
         '--verbose', '-v', action='store_true', help='Enable verbose logging'
     )
+    parser.add_argument('--log-file', help='Log file path (optional)')
+    parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        default='INFO',
+        help='Log level (default: INFO)',
+    )
     parser.add_argument(
         '--create-config',
         action='store_true',
@@ -954,6 +1028,15 @@ def main():
     )
     parser.add_argument('--max-vms', type=int, help='Override max VMs (1-2)')
     parser.add_argument('--labels', nargs='*', help='Override labels')
+    parser.add_argument('--vm-prefix', help='Override VM name prefix')
+    parser.add_argument(
+        '--ephemeral', action='store_true', help='Make runners ephemeral'
+    )
+    parser.add_argument(
+        '--no-ephemeral',
+        action='store_true',
+        help='Make runners non-ephemeral',
+    )
 
     args = parser.parse_args()
 
@@ -961,7 +1044,7 @@ def main():
         create_sample_config(args.config)
         return
 
-    setup_logging(args.verbose)
+    setup_logging(args.verbose, args.log_file, args.log_level)
 
     if not Path(args.config).exists():
         logger.error('Configuration file not found: %s', args.config)

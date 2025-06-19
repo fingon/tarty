@@ -39,12 +39,14 @@ def test_runner_config_valid():
         'update_hour': 10,
         'max_vms': 1,
         'labels': ['macos', 'test'],
+        'ephemeral': False,
     }
     config = RunnerConfig(**config_data)
     assert config.github_pat == 'test_pat'
     assert config.update_hour == 10
     assert config.max_vms == 1
     assert config.labels == ['macos', 'test']
+    assert config.ephemeral is False
 
 
 @pytest.mark.parametrize(
@@ -131,6 +133,17 @@ def test_runner_config_optional_labels():
     assert config.labels is None
 
 
+def test_runner_config_ephemeral_defaults_true():
+    config_data = {
+        'github_pat': 'pat',
+        'organization': 'org',
+        'base_image': 'base',
+        'runner_image': 'runner',
+    }
+    config = RunnerConfig(**config_data)
+    assert config.ephemeral is True
+
+
 @pytest.fixture
 def mock_config_file(tmp_path):
     config_data = {
@@ -144,6 +157,8 @@ def mock_config_file(tmp_path):
         'update_hour': 5,
         'max_vms': 2,
         'labels': ['macos', 'mock'],
+        'ephemeral': False,
+        'vm_prefix': 'test',
     }
     config_path = tmp_path / 'test_config.json'
     with open(config_path, 'w') as f:
@@ -164,6 +179,8 @@ def test_tarty_config_load_success(mock_config_file):
     assert config.update_hour == expected_data['update_hour']
     assert config.max_vms == expected_data['max_vms']
     assert config.labels == expected_data['labels']
+    assert config.ephemeral == expected_data['ephemeral']
+    assert config.vm_prefix == expected_data['vm_prefix']
 
 
 def test_tarty_config_file_not_found(tmp_path):
@@ -227,40 +244,40 @@ def test_run_ssh_command_failure(mock_run):
 
 
 @patch('tarty.run_tart_command')
-def test_cleanup_previous_tarty_vms_success(mock_run_tart_command):
+def test_cleanup_previous_vms_success(mock_run_tart_command):
     mock_run_tart_command.side_effect = [
         MagicMock(
-            stdout='tarty-old-vm\nother-vm\ntarty-another\n', returncode=0
+            stdout='test-old-vm\nother-vm\ntest-another\n', returncode=0
         ),
         MagicMock(returncode=0),
         MagicMock(returncode=0),
     ]
 
-    from tarty import cleanup_previous_tarty_vms
+    from tarty import cleanup_previous_vms
 
-    cleanup_previous_tarty_vms()
+    cleanup_previous_vms('test')
 
     mock_run_tart_command.assert_any_call(
         ['list', '-q'], capture_output=True, text=True, check=True
     )
     mock_run_tart_command.assert_any_call(
-        ['delete', 'tarty-old-vm'], capture_output=True, check=True
+        ['delete', 'test-old-vm'], capture_output=True, check=True
     )
     mock_run_tart_command.assert_any_call(
-        ['delete', 'tarty-another'], capture_output=True, check=True
+        ['delete', 'test-another'], capture_output=True, check=True
     )
     assert mock_run_tart_command.call_count == 3
 
 
 @patch('tarty.run_tart_command')
-def test_cleanup_previous_tarty_vms_no_tarty_vms(mock_run_tart_command):
+def test_cleanup_previous_vms_no_matching_vms(mock_run_tart_command):
     mock_run_tart_command.return_value = MagicMock(
         stdout='other-vm\nanother-vm\n', returncode=0
     )
 
-    from tarty import cleanup_previous_tarty_vms
+    from tarty import cleanup_previous_vms
 
-    cleanup_previous_tarty_vms()
+    cleanup_previous_vms('test')
 
     mock_run_tart_command.assert_called_once_with(
         ['list', '-q'], capture_output=True, text=True, check=True
@@ -268,14 +285,14 @@ def test_cleanup_previous_tarty_vms_no_tarty_vms(mock_run_tart_command):
 
 
 @patch('tarty.run_tart_command')
-def test_cleanup_previous_tarty_vms_list_fails(mock_run_tart_command):
+def test_cleanup_previous_vms_list_fails(mock_run_tart_command):
     mock_run_tart_command.side_effect = subprocess.CalledProcessError(
         1, 'tart list'
     )
 
-    from tarty import cleanup_previous_tarty_vms
+    from tarty import cleanup_previous_vms
 
-    cleanup_previous_tarty_vms()
+    cleanup_previous_vms('test')
 
     mock_run_tart_command.assert_called_once_with(
         ['list', '-q'], capture_output=True, text=True, check=True
@@ -283,21 +300,21 @@ def test_cleanup_previous_tarty_vms_list_fails(mock_run_tart_command):
 
 
 @patch('tarty.run_tart_command')
-def test_cleanup_previous_tarty_vms_delete_fails(mock_run_tart_command):
+def test_cleanup_previous_vms_delete_fails(mock_run_tart_command):
     mock_run_tart_command.side_effect = [
-        MagicMock(stdout='tarty-old-vm\n', returncode=0),
+        MagicMock(stdout='test-old-vm\n', returncode=0),
         subprocess.CalledProcessError(1, 'tart delete'),
     ]
 
-    from tarty import cleanup_previous_tarty_vms
+    from tarty import cleanup_previous_vms
 
-    cleanup_previous_tarty_vms()
+    cleanup_previous_vms('test')
 
     mock_run_tart_command.assert_any_call(
         ['list', '-q'], capture_output=True, text=True, check=True
     )
     mock_run_tart_command.assert_any_call(
-        ['delete', 'tarty-old-vm'], capture_output=True, check=True
+        ['delete', 'test-old-vm'], capture_output=True, check=True
     )
 
 
@@ -561,6 +578,7 @@ def test_register_runner_with_labels(
     mock_runner_config,
 ):
     mock_runner_config.labels = ['macos', 'tart']
+    mock_runner_config.ephemeral = True
     mock_vm = MagicMock()
     mock_vm.name = 'test-vm'
     mock_vm.get_vm_ip.return_value = '192.168.1.102'
@@ -573,6 +591,39 @@ def test_register_runner_with_labels(
     assert manager.register_runner(mock_vm) is True
     mock_ssh_client_instance.execute_command.assert_called_once_with(
         'cd actions-runner && ./config.sh --url https://github.com/test_org/test_repo --token mock_token --name test-vm --ephemeral --unattended --labels macos,tart',
+        RUNNER_CONFIG_TIMEOUT,
+    )
+    mock_thread.assert_called_once()
+    mock_sleep.assert_called_once_with(RUNNER_START_DELAY)
+
+
+@patch(
+    'tarty.GitHubRunnerManager.get_registration_token',
+    return_value='mock_token',
+)
+@patch('tarty.SSHClient')
+@patch('tarty.threading.Thread')
+@patch('time.sleep')
+def test_register_runner_non_ephemeral(
+    mock_sleep,
+    mock_thread,
+    mock_ssh_client_cls,
+    mock_get_token,
+    mock_runner_config,
+):
+    mock_runner_config.ephemeral = False
+    mock_vm = MagicMock()
+    mock_vm.name = 'test-vm'
+    mock_vm.get_vm_ip.return_value = '192.168.1.102'
+
+    mock_ssh_client_instance = MagicMock()
+    mock_ssh_client_cls.return_value = mock_ssh_client_instance
+    mock_ssh_client_instance.execute_command.return_value = True
+
+    manager = GitHubRunnerManager(mock_runner_config)
+    assert manager.register_runner(mock_vm) is True
+    mock_ssh_client_instance.execute_command.assert_called_once_with(
+        'cd actions-runner && ./config.sh --url https://github.com/test_org/test_repo --token mock_token --name test-vm --replace --unattended',
         RUNNER_CONFIG_TIMEOUT,
     )
     mock_thread.assert_called_once()
@@ -718,8 +769,9 @@ def test_update_runner_image_success(
     mock_image_config,
 ):
     mock_image_config.convert_command = 'some_command'
+    mock_image_config.vm_prefix = 'test'
 
-    temp_vm_name_expected = f'tarty-convert-{int(mock_time.return_value)}'
+    temp_vm_name_expected = f'test-convert-{int(mock_time.return_value)}'
 
     mock_temp_vm = MagicMock()
     mock_temp_vm.name = temp_vm_name_expected
@@ -758,8 +810,9 @@ def test_update_runner_image_conversion_fails(
     mock_image_config,
 ):
     mock_image_config.convert_command = 'some_command'
+    mock_image_config.vm_prefix = 'test'
 
-    temp_vm_name_expected = f'tarty-convert-{int(mock_time.return_value)}'
+    temp_vm_name_expected = f'test-convert-{int(mock_time.return_value)}'
     mock_temp_vm = MagicMock()
     mock_temp_vm.name = temp_vm_name_expected
     mock_create_temp_vm.return_value = mock_temp_vm
@@ -799,7 +852,7 @@ def test_orchestrator_init_config_error(
     mock_sys_exit.assert_called_once_with(1)
 
 
-@patch('tarty.cleanup_previous_tarty_vms')
+@patch('tarty.cleanup_previous_vms')
 @patch('tarty.TartyOrchestrator._orchestration_cycle')
 @patch('time.sleep', return_value=None)
 def test_orchestrator_start_stop_loop(mock_sleep, mock_cycle, mock_cleanup):
@@ -844,12 +897,13 @@ def test_orchestration_cycle_calls_sub_methods(
 
 
 @patch('tarty.TartyOrchestrator._cleanup_vm')
-def test_cleanup_completed_vms(mock_cleanup_vm):
+def test_cleanup_completed_vms_ephemeral(mock_cleanup_vm):
     with (
         patch('tarty.GitHubRunnerManager'),
         patch('tarty.ImageManager'),
     ):
         mock_config = MagicMock()
+        mock_config.ephemeral = True
         orchestrator = TartyOrchestrator(mock_config)
 
         vm1 = MagicMock()
@@ -876,13 +930,17 @@ def test_cleanup_completed_vms(mock_cleanup_vm):
     side_effect=[True, False],
 )
 @patch('tarty.time.time', return_value=1234567890.0)
-def test_start_new_vms_if_needed(mock_time, mock_create_and_start_vm):
+def test_start_new_vms_if_needed_ephemeral(
+    mock_time, mock_create_and_start_vm
+):
     with (
         patch('tarty.GitHubRunnerManager'),
         patch('tarty.ImageManager'),
     ):
         mock_config = MagicMock()
         mock_config.max_vms = 2
+        mock_config.ephemeral = True
+        mock_config.vm_prefix = 'test'
 
         orchestrator = TartyOrchestrator(mock_config)
         orchestrator.vms = {}
@@ -891,8 +949,31 @@ def test_start_new_vms_if_needed(mock_time, mock_create_and_start_vm):
 
         mock_create_and_start_vm.assert_called_once()
         assert mock_create_and_start_vm.call_args[0][0].startswith(
-            'tarty-runner-'
+            'test-runner-'
         )
+
+
+@patch(
+    'tarty.TartyOrchestrator._create_and_start_vm',
+    side_effect=[True, False],
+)
+def test_start_new_vms_if_needed_non_ephemeral(mock_create_and_start_vm):
+    with (
+        patch('tarty.GitHubRunnerManager'),
+        patch('tarty.ImageManager'),
+    ):
+        mock_config = MagicMock()
+        mock_config.max_vms = 2
+        mock_config.ephemeral = False
+        mock_config.vm_prefix = 'test'
+
+        orchestrator = TartyOrchestrator(mock_config)
+        orchestrator.vms = {}
+
+        orchestrator._start_new_vms_if_needed()
+
+        mock_create_and_start_vm.assert_called_once()
+        assert mock_create_and_start_vm.call_args[0][0] == 'test-runner-1'
 
 
 @patch('tarty.time.time', return_value=1234567890.0)
@@ -918,7 +999,7 @@ def test_create_and_start_vm_success(mock_time):
             )
             mock_runner_manager_instance.register_runner.return_value = True
 
-            vm_name = f'tarty-runner-{int(mock_time.return_value)}'
+            vm_name = f'test-runner-{int(mock_time.return_value)}'
             assert orchestrator._create_and_start_vm(vm_name) is True
 
             mock_image_manager_instance.create_runner_image.assert_called_once_with(
@@ -946,7 +1027,7 @@ def test_create_and_start_vm_image_creation_fail(mock_time):
 
         mock_image_manager_instance.create_runner_image.return_value = False
 
-        vm_name = f'tarty-runner-{int(mock_time.return_value)}'
+        vm_name = f'test-runner-{int(mock_time.return_value)}'
         assert orchestrator._create_and_start_vm(vm_name) is False
 
         mock_image_manager_instance.create_runner_image.assert_called_once_with(
@@ -979,7 +1060,7 @@ def test_create_and_start_vm_runner_registration_fail(mock_time):
             )
             mock_runner_manager_instance.register_runner.return_value = False
 
-            vm_name = f'tarty-runner-{int(mock_time.return_value)}'
+            vm_name = f'test-runner-{int(mock_time.return_value)}'
             assert orchestrator._create_and_start_vm(vm_name) is False
 
             mock_image_manager_instance.create_runner_image.assert_called_once_with(
@@ -1099,3 +1180,24 @@ def test_make_room_for_update_kills_one_vm(mock_cleanup_vm):
 
         mock_cleanup_vm.assert_called_once()
         assert mock_cleanup_vm.call_args[0][0] in [vm1, vm2]
+
+
+def test_cleanup_existing_vms():
+    with (
+        patch('tarty.GitHubRunnerManager'),
+        patch('tarty.ImageManager'),
+    ):
+        mock_config = MagicMock()
+        orchestrator = TartyOrchestrator(mock_config)
+
+        vm1 = MagicMock(name='vm1')
+        vm1.destroy.return_value = True
+        vm2 = MagicMock(name='vm2')
+        vm2.destroy.return_value = True
+
+        orchestrator.vms = {'vm1': vm1, 'vm2': vm2}
+
+        orchestrator._cleanup_existing_vms()
+
+        vm1.destroy.assert_called_once()
+        vm2.destroy.assert_called_once()
