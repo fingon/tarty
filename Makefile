@@ -1,5 +1,8 @@
+UV_RUN=uv run --group dev
+PYTEST=$(UV_RUN) pytest
+
 test:
-	uv run pytest
+	$(PYTEST)
 
 test-trace:
-	uv run pytest --full-trace
+	$(PYTEST) pytest --full-trace
