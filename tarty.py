@@ -762,10 +762,8 @@ class ImageManager:
 
     def _cleanup_temp_vm(self, temp_vm_name: str):
         """Clean up temporary VM."""
-        try:
-            run_tart_command(['delete', temp_vm_name], capture_output=True)
-        except subprocess.CalledProcessError:
-            pass
+        run_tart_command(['stop', temp_vm_name], capture_output=True)
+        run_tart_command(['delete', temp_vm_name], capture_output=True)
 
     def should_update(self, update_hour: int = DEFAULT_UPDATE_HOUR) -> bool:
         """Check if runner image should be updated (nightly at specified hour)."""
